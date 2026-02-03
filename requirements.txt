@@ -1,0 +1,15 @@
+# ─── Core LangChain ecosystem (pip-resolved, uyumlu set) ─
+langchain>=1.2.0
+langchain-openai>=1.1.0
+langchain-core>=1.2.0
+langgraph>=1.0.0
+langsmith>=0.6.0
+
+# ─── LLM + GitHub + UI ───────────────────────────────────
+openai>=2.0.0
+PyGithub>=2.3
+streamlit>=1.38.0
+
+# ─── Utility ─────────────────────────────────────────────
+python-dotenv>=1.0.1
+tiktoken>=0.7.0
