@@ -9,6 +9,7 @@ Imports src/ modulerini kullanır.
 import os
 import sys
 import json
+import time
 
 import streamlit as st
 
@@ -16,8 +17,9 @@ import streamlit as st
 sys.path.insert(0, os.path.dirname(__file__))
 
 from src.core.config import settings
-from src.api.github_fetcher import parse_repo_url
-from src.services.audit_service import run_audit
+from src.api.github_fetcher import parse_repo_url, fetch_target_files, format_files_context
+from src.graph.graph import build_graph
+from src.graph.state import PipelineState
 from src.utils.parser import safe_json_parse
 
 
@@ -134,10 +136,17 @@ with st.sidebar:
 st.markdown('<div class="hero-title">🔍 Autonomous Clean Code Auditor</div>', unsafe_allow_html=True)
 st.markdown('<div class="hero-sub">Multi-Agent .NET / SOLID Code Analysis · LangSmith Traced</div>', unsafe_allow_html=True)
 
+# ─── Mod açıklaması ────────────────────────────────────
+st.info("""
+💡 **İki Mod Destekleniyor:**
+- 📦 **Repo Mode:** `https://github.com/user/repo` → Tüm .cs dosyalarını analiz eder
+- 📄 **Single File Mode:** `.../blob/main/Program.cs` veya `.../Program.cs` → Sadece o dosyayı analiz eder
+""")
+
 col_input, col_btn = st.columns([3, 1])
-repo_url   = col_input.text_input(
-    "GitHub Repo URL",
-    placeholder="https://github.com/user/repo",
+repo_url = col_input.text_input(
+    "GitHub Repo veya Dosya URL'si",
+    placeholder="https://github.com/user/repo  VEYA  .../blob/main/file.cs",
     label_visibility="collapsed",
 )
 run_clicked = col_btn.button("🚀 Analiz Başlat")
@@ -163,46 +172,111 @@ if run_clicked:
         st.error("❌ .env'de OPENAI_API_KEY ve LANGSMITH_API_KEY tanımlanmalı.")
         st.stop()
 
-    # ── Agent progress placeholders ────────────────────
+    # ── Progress tracking ──────────────────────────────
     st.divider()
     st.subheader("🤖 Agent Pipeline")
-
+    
+    progress_bar = st.progress(0, text="Başlatılıyor...")
     ph_analyst = st.empty()
     ph_critic  = st.empty()
     ph_fixer   = st.empty()
 
-    # initial state → Analyst running, diğerleri pending
-    ph_analyst.markdown(_agent_card_html("Agent A — Analyst", "running", "Kodu analiz ediyor..."), unsafe_allow_html=True)
+    # Initial cards
+    ph_analyst.markdown(_agent_card_html("Agent A — Analyst", "pending"), unsafe_allow_html=True)
     ph_critic.markdown(_agent_card_html("Agent B — Critic",  "pending"), unsafe_allow_html=True)
     ph_fixer.markdown(_agent_card_html("Agent C — Fixer",   "pending"), unsafe_allow_html=True)
 
-    # ── Run audit ──────────────────────────────────────
-    with st.status("Pipeline çalışıyor...", expanded=True) as pipe_status:
-        try:
-            files, final_state = run_audit(repo_url)
-            pipe_status.update(label="✅ Pipeline tamamlandı.", state="complete")
-        except (RuntimeError, ValueError) as e:
-            pipe_status.update(label=f"❌ Hata: {e}", state="error")
-            st.error(str(e))
-            st.stop()
-        except Exception as e:
-            pipe_status.update(label=f"❌ Beklenmeyen hata: {e}", state="error")
-            st.error(str(e))
-            st.stop()
+    try:
+        # ── Step 1: GitHub Fetch (0-25%) ──────────────
+        progress_bar.progress(5, text="📥 GitHub'dan dosyalar çekiliyor...")
+        ph_analyst.markdown(_agent_card_html("Agent A — Analyst", "running", "Repo dosyaları indiriliyor..."), unsafe_allow_html=True)
+        
+        files = fetch_target_files(repo_url)
+        files_context = format_files_context(files)
+        
+        progress_bar.progress(25, text=f"✅ {len(files)} dosya çekildi")
+        
+        # ── Step 2: Build Pipeline (25-30%) ───────────
+        progress_bar.progress(30, text="🔧 Pipeline hazırlanıyor...")
+        
+        pipeline = build_graph()
+        
+        initial_state: PipelineState = {
+            "files_context":  files_context,
+            "analyst_output": "",
+            "critic_output":  "",
+            "fixer_output":   "",
+            "retry_count":    0,
+            "approved":       False,
+            "trace_log":      [],
+        }
 
-    # ── Parse agent outputs ────────────────────────────
-    analyst_data = safe_json_parse(final_state["analyst_output"])
-    critic_data  = safe_json_parse(final_state["critic_output"])
-    fixer_data   = safe_json_parse(final_state["fixer_output"])
+        # ── Step 3: Run Pipeline (30-100%) ────────────
+        progress_bar.progress(35, text="🔍 Analyst kodu analiz ediyor...")
+        ph_analyst.markdown(_agent_card_html("Agent A — Analyst", "running", "SOLID ve Clean Architecture analizi yapılıyor..."), unsafe_allow_html=True)
+        
+        config = {
+            "tags": ["clean-code-auditor", "multi-agent"],
+            "metadata": {"run_type": "audit_pipeline"},
+        }
+        
+        final_state: PipelineState = pipeline.invoke(initial_state, config=config)
+        
+        # ── Parse outputs ──────────────────────────────
+        analyst_data = safe_json_parse(final_state["analyst_output"])
+        critic_data  = safe_json_parse(final_state["critic_output"])
+        fixer_data   = safe_json_parse(final_state["fixer_output"])
 
-    analyst_count = len(analyst_data.get("analyst_findings", []))
-    critic_missed = len(critic_data.get("critic_review", {}).get("missed_issues", []))
-    fixer_count   = len(fixer_data.get("fixes", []))
+        analyst_count = len(analyst_data.get("analyst_findings", []))
+        critic_missed = len(critic_data.get("critic_review", {}).get("missed_issues", []))
+        fixer_count   = len(fixer_data.get("fixes", []))
+        
+        # ── Retry info ─────────────────────────────────
+        retry_count = final_state.get("retry_count", 0)
+        approved = final_state.get("approved", False)
 
-    # ── Update cards → done ────────────────────────────
-    ph_analyst.markdown(_agent_card_html("Agent A — Analyst", "done", f"{analyst_count} sorun tespit etti"), unsafe_allow_html=True)
-    ph_critic.markdown(_agent_card_html("Agent B — Critic",  "done", f"{critic_missed} eksik bulduktan sonra onayladı"), unsafe_allow_html=True)
-    ph_fixer.markdown(_agent_card_html("Agent C — Fixer",   "done", f"{fixer_count} düzeltme üretildi"), unsafe_allow_html=True)
+        # ── Update progress ────────────────────────────
+        progress_bar.progress(100, text="✅ Pipeline tamamlandı!")
+
+        # ── Update cards → done ────────────────────────
+        ph_analyst.markdown(
+            _agent_card_html("Agent A — Analyst", "done", f"{analyst_count} sorun tespit etti"),
+            unsafe_allow_html=True
+        )
+        
+        # Critic card with retry info
+        critic_detail = f"{critic_missed} eksik buldu"
+        if retry_count > 0:
+            critic_detail += f" · {retry_count} kez Analyst'i düzeltti"
+        if approved:
+            critic_detail += " · ✅ Onaylandı"
+        else:
+            critic_detail += " · ⚠️ Max retry (devam edildi)"
+        
+        ph_critic.markdown(
+            _agent_card_html("Agent B — Critic", "done", critic_detail),
+            unsafe_allow_html=True
+        )
+        
+        ph_fixer.markdown(
+            _agent_card_html("Agent C — Fixer", "done", f"{fixer_count} düzeltme üretildi"),
+            unsafe_allow_html=True
+        )
+        
+        # Progress bar'ı kaldır
+        time.sleep(1)
+        progress_bar.empty()
+
+    except (RuntimeError, ValueError) as e:
+        progress_bar.empty()
+        st.error(f"❌ Hata: {e}")
+        st.stop()
+    except Exception as e:
+        progress_bar.empty()
+        st.error(f"❌ Beklenmeyen hata: {e}")
+        import traceback
+        st.error(f"Stack trace:\n{traceback.format_exc()}")
+        st.stop()
 
     # ── Fetched files expander ─────────────────────────
     with st.expander(f"📁 Çekilen Dosyalar ({len(files)})"):
@@ -257,7 +331,7 @@ if run_clicked:
         corrections = review.get("corrections", [])
 
         st.markdown(
-            f"**Onay Durumu:** {'✅ Onaylandı' if approved else '⚠️ Onaylanmadı (retry sonrası devam etti)'}"
+            f"**Onay Durumu:** {'✅ Onaylandı' if approved else '⚠️ Onaylanmadı (max retry sonrası devam etti)'}"
         )
 
         if feedback:
@@ -268,7 +342,7 @@ if run_clicked:
             for item in missed:
                 with st.expander(f"📄 {item.get('file', '')} → {item.get('line_hint', '')}"):
                     st.markdown(f"**Severity:** `{item.get('severity', '')}`")
-                    st.markdown(f"**Sorun:** {item.get('description', '')}")
+                    st.markdown(f"**Sorun:** {item.get('description', '')}`")
                     st.markdown(f"**Öneri:** {item.get('suggestion', '')}")
 
         if corrections:

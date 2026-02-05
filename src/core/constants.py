@@ -1,33 +1,43 @@
+# src/core/constants.py - TAM DOSYA (eski yerine bu gelecek)
+
 """
 constants.py
 ────────────
 Tüm sabit değerler burada. Magic number yok.
 """
 
+# ─── QUICK TEST MODE (YENI!) ────────────────────────────
+QUICK_TEST_MODE: bool = True  # False yapınca normal mod
+
 # ─── GitHub Fetcher ──────────────────────────────────────
 TARGET_EXTENSIONS: set[str] = {".cs", ".csproj"}
-MAX_FILE_SIZE_BYTES: int    = 500_000          # 500 KB
-MAX_TREE_DEPTH: int         = 8                # recursive dir gezme limiti
+
+# Quick mode'da dosya limitleri DAHA DÜŞÜK
+if QUICK_TEST_MODE:
+    MAX_FILE_SIZE_BYTES: int = 30_000      # 30KB (hızlı test)
+    MAX_FILES_LIMIT: int = 8               # Max 8 dosya
+    MAX_CONTEXT_CHARS: int = 40_000        # 40k char (10k token)
+    MAX_FILE_CHARS: int = 8_000            # Dosya başına 8k
+else:
+    MAX_FILE_SIZE_BYTES: int = 500_000     # Normal: 500KB
+    MAX_FILES_LIMIT: int = 50              # Normal: 50 dosya
+    MAX_CONTEXT_CHARS: int = 60_000
+    MAX_FILE_CHARS: int = 10_000
+
+MAX_TREE_DEPTH: int = 8
 
 SKIP_DIRECTORIES: set[str] = {
     "node_modules", "bin", "obj", ".git",
     "packages", "vendor", "__pycache__",
 }
 
-# ─── Token Budget ────────────────────────────────────────
-# gpt-4o-mini → 1M TPM, 128k context window → çok rahat
-# Ama yine de context'i sane tutalalım: ~15k token input hedef
-# 1 token ≈ 4 char  →  15_000 * 4 = 60_000 char max
-MAX_CONTEXT_CHARS: int  = 60_000               # tüm dosyalar toplam char limiti
-MAX_FILE_CHARS: int     = 10_000               # tek dosya max char
-
 # ─── Agent Pipeline ─────────────────────────────────────
-MAX_CRITIC_RETRIES: int = 2                    # Critic retry loop limiti
+# KRITIK: Quick mode'da retry YOK!
+MAX_CRITIC_RETRIES: int = 2 if QUICK_TEST_MODE else 3
 
 # ─── LLM ─────────────────────────────────────────────────
-# gpt-4o-mini: TPM limit çok yüksek, cost düşük, .NET analiz kalitesi yeterli
-DEFAULT_MODEL: str      = "gpt-4o-mini"
-DEFAULT_TEMPERATURE: float = 0.2               # düşük → tutarlı analiz
+DEFAULT_MODEL: str = "gpt-4o-mini"
+DEFAULT_TEMPERATURE: float = 0.0  # Sıfır = en hızlı
 
 # ─── Prompt File Paths ───────────────────────────────────
 import os

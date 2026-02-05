@@ -1,3 +1,5 @@
+# src/graph/graph.py - TAM DOSYA (linear yerine loop'lu versiyon)
+
 """
 graph.py
 --------
@@ -21,7 +23,7 @@ from src.graph.state import PipelineState
 from src.graph.nodes.analyst import analyst_node
 from src.graph.nodes.critic  import critic_node
 from src.graph.nodes.fixer   import fixer_node
-from src.graph.nodes.retry   import retry_node       # NEW
+from src.graph.nodes.retry   import retry_node
 from src.graph.router        import critic_router
 
 
@@ -37,7 +39,7 @@ def build_graph() -> "CompiledStateGraph":
     # ── Nodes ──────────────────────────────────────────
     graph.add_node("analyst",    analyst_node)
     graph.add_node("critic",     critic_node)
-    graph.add_node("retry",      retry_node)          # NEW: retry counter node
+    graph.add_node("retry",      retry_node)
     graph.add_node("fixer",      fixer_node)
 
     # ── Edges ──────────────────────────────────────────

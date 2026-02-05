@@ -26,12 +26,46 @@ from src.core.constants import (
     MAX_FILE_CHARS,
 )
 
+from enum import Enum
+from typing import Literal
+
+class FetchMode(str, Enum):
+    REPO = "repo"
+    FILE = "file"
+
 logger = logging.getLogger(__name__)
 
 # ─── Retry config ────────────────────────────────────────
 MAX_RETRIES      = 3
 BACKOFF_SECONDS  = [2, 5, 10]        # her retry'de artan bekle
 
+
+def detect_fetch_mode(url: str) -> tuple[FetchMode, str]:
+    """
+    URL'den fetch modunu otomatik tespit eder.
+    
+    Returns:
+        (mode, clean_url)
+        
+    Kurallar:
+    - URL .cs ile bitiyorsa → FILE mode
+    - URL /tree/ veya /blob/ içeriyorsa ve .cs bitiyorsa → FILE mode
+    - Diğer durumlar → REPO mode
+    """
+    url = url.strip()
+    
+    # .cs dosyası mı?
+    if url.endswith(".cs") or url.endswith(".csproj"):
+        return FetchMode.FILE, url
+    
+    # /blob/ veya /tree/ içinde dosya path'i var mı?
+    if "/blob/" in url or "/tree/" in url:
+        # Son segment'e bak
+        last_part = url.split("/")[-1]
+        if "." in last_part:  # Uzantılı dosya
+            return FetchMode.FILE, url
+    
+    return FetchMode.REPO, url
 
 # ─── Client ──────────────────────────────────────────────
 def _get_client() -> Github:
@@ -43,18 +77,96 @@ def _get_client() -> Github:
 # ─── URL Parser ──────────────────────────────────────────
 def parse_repo_url(url: str) -> tuple[str, str]:
     """
-    'https://github.com/user/repo' -> ('user', 'repo')
+    GitHub URL'sinden owner ve repo çıkarır.
+    Artık dosya path'lerini de handle eder.
     """
-    url = url.strip().rstrip("/").removesuffix(".git")
-    parts = url.replace("https://github.com/", "").split("/")
-
-    if len(parts) != 2 or not parts[0] or not parts[1]:
+    url = url.strip()
+    
+    if "github.com/" not in url:
+        raise ValueError("URL 'github.com' içermelidir.")
+    
+    after_domain = url.split("github.com/", 1)[1]
+    
+    # .git varsa temizle
+    if ".git" in after_domain:
+        after_domain = after_domain.split(".git")[0]
+    
+    parts = after_domain.split("/")
+    
+    if len(parts) < 2 or not parts[0] or not parts[1]:
         raise ValueError(
-            "Gecersiz GitHub URL.\n"
-            "Beklenen format: https://github.com/user/repo"
+            "Geçersiz GitHub URL.\n"
+            "Beklenen: https://github.com/user/repo"
         )
+    
+    owner = parts[0]
+    repo = parts[1]
+    
+    return owner, repo
 
-    return parts[0], parts[1]
+def parse_file_path(url: str) -> str:
+    """
+    GitHub URL'sinden dosya path'ini çıkarır.
+    
+    Örnek:
+    https://github.com/user/repo/blob/main/src/Program.cs
+    → "src/Program.cs"
+    
+    https://github.com/user/repo.git/master/UniversityTinder/Program.cs
+    → "UniversityTinder/Program.cs"
+    """
+    url = url.strip()
+    
+    # .git/ sonrasını al
+    if ".git/" in url:
+        after_git = url.split(".git/", 1)[1]
+        # master/ veya main/ gibi branch ismini atla
+        parts = after_git.split("/")
+        if len(parts) > 1:
+            return "/".join(parts[1:])  # branch adını at
+        return after_git
+    
+    # /blob/ veya /tree/ sonrasını al
+    if "/blob/" in url:
+        return url.split("/blob/", 1)[1].split("/", 1)[1]  # branch'ı atla
+    
+    if "/tree/" in url:
+        return url.split("/tree/", 1)[1].split("/", 1)[1]
+    
+    raise ValueError(
+        f"Dosya path'i çıkarılamadı: {url}\n"
+        "Beklenen format: .../blob/main/path/file.cs"
+    )
+
+
+def fetch_single_file(repo_url: str) -> dict[str, str]:
+    """
+    Sadece belirtilen dosyayı çeker.
+    
+    Returns:
+        {file_path: content}
+    """
+    owner, repo_name = parse_repo_url(repo_url)
+    file_path = parse_file_path(repo_url)
+    
+    client = _get_client()
+    repo = _with_retry(client.get_repo, f"{owner}/{repo_name}")
+    
+    try:
+        file_content = _with_retry(repo.get_contents, file_path)
+        content = file_content.decoded_content.decode("utf-8")
+        
+        logger.info(f"✅ Dosya çekildi: {file_path}")
+        return {file_path: content}
+        
+    except GithubException as e:
+        if e.status == 404:
+            raise ValueError(
+                f"Dosya bulunamadı: {file_path}\n"
+                f"Repo: {owner}/{repo_name}\n"
+                "Path'i kontrol edin."
+            )
+        raise
 
 
 # ─── Retry wrapper ──────────────────────────────────────
@@ -98,23 +210,39 @@ def _with_retry(func, *args, **kwargs):
 # ─── Main Fetch ──────────────────────────────────────────
 def fetch_target_files(repo_url: str) -> dict[str, str]:
     """
-    Repo'daki tum .cs / .csproj dosyalarini ceker.
-    Network hatalarında retry yapır.
+    Otomatik mod tespiti ile fetch yapar:
+    - .cs dosyası → sadece o dosya
+    - repo URL → tüm .cs dosyaları
     """
+    mode, clean_url = detect_fetch_mode(repo_url)
+    
+    if mode == FetchMode.FILE:
+        logger.info("📄 Single File Mode")
+        return fetch_single_file(clean_url)
+    else:
+        logger.info("📦 Repo Mode")
+        return _fetch_repo_files(clean_url)
+
+def _fetch_repo_files(repo_url: str) -> dict[str, str]:
+    """
+    Repo'daki tüm .cs / .csproj dosyalarını çeker.
+    (Eski fetch_target_files mantığı)
+    """
+    from src.core.constants import MAX_FILES_LIMIT
+    
     owner, repo_name = parse_repo_url(repo_url)
     client = _get_client()
-
-    # get_repo -> retry ile
     repo = _with_retry(client.get_repo, f"{owner}/{repo_name}")
 
     files: dict[str, str] = {}
-    _walk_tree(repo, path="", files=files, depth=0)
+    _walk_tree(repo, path="", files=files, depth=0, max_files=MAX_FILES_LIMIT)
 
     if not files:
         raise ValueError(
             f"Repo'da {TARGET_EXTENSIONS} uzantili dosya bulunamadı."
         )
 
+    logger.info(f"✅ Toplam {len(files)} dosya çekildi.")
     return files
 
 
@@ -124,17 +252,21 @@ def _walk_tree(
     path: str,
     files: dict[str, str],
     depth: int,
+    max_files: int = 999,  # Yeni parametre!
 ) -> None:
-    """Repo tree'yi recursive gezir, hedef dosyalari ceker."""
+    """Repo tree'yi gezir, max_files limitine ulaşınca durur."""
 
     if depth > MAX_TREE_DEPTH:
         return
+    
+    # Limit kontrolü - YENI!
+    if len(files) >= max_files:
+        logger.info(f"⚠️ Dosya limiti ({max_files}) doldu, durduruldu.")
+        return
 
-    # get_contents -> retry ile
     try:
         contents = _with_retry(repo.get_contents, path)
     except RuntimeError as e:
-        # max retry aşıldı ama tree walk devam edebilir
         logger.warning(f"  [SKIP] {path}: {e}")
         files[path] = f"// [NETWORK ERROR] Bu path cekilemedi: {path}"
         return
@@ -145,10 +277,14 @@ def _walk_tree(
         contents = [contents]
 
     for item in contents:
+        # Her item'de tekrar kontrol - YENI!
+        if len(files) >= max_files:
+            break
+            
         if item.type == "dir":
             if item.name.lower() in SKIP_DIRECTORIES:
                 continue
-            _walk_tree(repo, item.path, files, depth + 1)
+            _walk_tree(repo, item.path, files, depth + 1, max_files)  # max_files'ı geç
 
         elif item.type == "file":
             if not _is_target_file(item.name):
